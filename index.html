@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Nupur POC Scanner</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #0f0f0f;
+        color: #fff;
+        min-height: 100dvh;
+      }
+      header {
+        padding: 12px 14px;
+        background: linear-gradient(135deg, #7b1e3a, #5a1530);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 1.05rem;
+      }
+      header p {
+        margin: 4px 0 0;
+        font-size: 0.8rem;
+        opacity: 0.85;
+      }
+      .config {
+        padding: 10px 14px;
+        background: #1c1c1c;
+        border-bottom: 1px solid #333;
+      }
+      .config label {
+        display: block;
+        font-size: 0.75rem;
+        margin-bottom: 4px;
+        color: #bbb;
+      }
+      .config input {
+        width: 100%;
+        padding: 8px;
+        border-radius: 6px;
+        border: 1px solid #444;
+        background: #111;
+        color: #fff;
+        font-size: 0.8rem;
+      }
+      .modes {
+        display: flex;
+        gap: 8px;
+        padding: 10px 14px;
+      }
+      .modes button {
+        flex: 1;
+        border: 0;
+        border-radius: 10px;
+        padding: 14px;
+        font-size: 1.1rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        background: #2a2a2a;
+        color: #ccc;
+      }
+      .modes button.active-in {
+        background: #1b5e20;
+        color: #fff;
+      }
+      .modes button.active-out {
+        background: #b71c1c;
+        color: #fff;
+      }
+      #videoWrap {
+        position: relative;
+        background: #000;
+        aspect-ratio: 3 / 4;
+        max-height: 52dvh;
+        overflow: hidden;
+      }
+      video,
+      canvas {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      canvas {
+        display: none;
+      }
+      .overlay {
+        position: absolute;
+        inset: 18% 10%;
+        border: 2px solid rgba(255, 255, 255, 0.65);
+        border-radius: 12px;
+        pointer-events: none;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+        padding: 10px 14px;
+      }
+      .stat {
+        background: #1a1a1a;
+        border-radius: 10px;
+        padding: 10px;
+        text-align: center;
+      }
+      .stat .label {
+        font-size: 0.7rem;
+        color: #aaa;
+      }
+      .stat .value {
+        font-size: 1.4rem;
+        font-weight: 700;
+      }
+      .flash {
+        position: fixed;
+        inset: 0;
+        background: rgba(129, 199, 132, 0.35);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s;
+      }
+      .flash.show {
+        opacity: 1;
+      }
+      .log {
+        margin: 0 14px 14px;
+        padding: 10px;
+        background: #161616;
+        border-radius: 10px;
+        max-height: 140px;
+        overflow: auto;
+        font-size: 0.78rem;
+        line-height: 1.35;
+      }
+      .log .ok {
+        color: #81c784;
+      }
+      .log .err {
+        color: #ef9a9a;
+      }
+      .log .pending {
+        color: #ffd54f;
+      }
+      #cameraError {
+        padding: 0 14px 10px;
+        color: #ef9a9a;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Nupur Collection — QR Scanner POC</h1>
+      <p>External page (top-level) — continuous IN/OUT scanning</p>
+    </header>
+
+    <div class="config">
+      <label for="gasUrl">Apps Script web app URL (doPost enabled deployment)</label>
+      <input
+        id="gasUrl"
+        type="url"
+        placeholder="https://script.google.com/macros/s/....../exec"
+      />
+    </div>
+
+    <div class="modes">
+      <button id="btnIn" type="button">IN</button>
+      <button id="btnOut" type="button">OUT</button>
+    </div>
+
+    <div id="videoWrap">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="canvas"></canvas>
+      <div class="overlay"></div>
+    </div>
+    <div id="cameraError"></div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Mode</div>
+        <div class="value" id="modeDisplay">IN</div>
+      </div>
+      <div class="stat">
+        <div class="label">Session scans</div>
+        <div class="value" id="scanCount">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Avg write ms</div>
+        <div class="value" id="avgMs">—</div>
+      </div>
+    </div>
+
+    <div class="log" id="log"></div>
+    <div class="flash" id="flash"></div>
+
+    <script>
+      (function () {
+        var STORAGE_KEY = 'nupur_poc_gas_url';
+        var mode = 'IN';
+        var scanCount = 0;
+        var writeTimes = [];
+        var scanningEnabled = true;
+        var lastPayload = '';
+        var lastAt = 0;
+        var pendingWrites = 0;
+        var stream = null;
+
+        var gasInput = document.getElementById('gasUrl');
+        var saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          gasInput.value = saved;
+        }
+        gasInput.addEventListener('change', function () {
+          localStorage.setItem(STORAGE_KEY, gasInput.value.trim());
+        });
+
+        function log(msg, cls) {
+          var el = document.createElement('div');
+          el.className = cls || '';
+          el.textContent = new Date().toLocaleTimeString() + ' — ' + msg;
+          document.getElementById('log').prepend(el);
+        }
+
+        function setMode(next) {
+          mode = next;
+          document.getElementById('modeDisplay').textContent = next;
+          document.getElementById('btnIn').className = next === 'IN' ? 'active-in' : '';
+          document.getElementById('btnOut').className = next === 'OUT' ? 'active-out' : '';
+        }
+
+        document.getElementById('btnIn').onclick = function () {
+          setMode('IN');
+        };
+        document.getElementById('btnOut').onclick = function () {
+          setMode('OUT');
+        };
+        setMode('IN');
+
+        function flashOk() {
+          var f = document.getElementById('flash');
+          f.classList.add('show');
+          setTimeout(function () {
+            f.classList.remove('show');
+          }, 120);
+        }
+
+        function updateAvg() {
+          if (!writeTimes.length) {
+            document.getElementById('avgMs').textContent = '—';
+            return;
+          }
+          var sum = writeTimes.reduce(function (a, b) {
+            return a + b;
+          }, 0);
+          document.getElementById('avgMs').textContent = String(Math.round(sum / writeTimes.length));
+        }
+
+        function postScan(payload) {
+          var url = gasInput.value.trim();
+          if (!url) {
+            log('Set GAS web app URL first', 'err');
+            return;
+          }
+
+          pendingWrites++;
+          log('Sending ' + mode + ': ' + payload, 'pending');
+
+          var started = performance.now();
+          fetch(url, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              mode: mode,
+              payload: payload,
+              clientTs: new Date().toISOString(),
+              source: 'external',
+            }),
+          })
+            .then(function () {
+              var elapsed = Math.round(performance.now() - started);
+              writeTimes.push(elapsed);
+              if (writeTimes.length > 30) {
+                writeTimes.shift();
+              }
+              updateAvg();
+              log('Write dispatched (~' + elapsed + ' ms round-trip)', 'ok');
+            })
+            .catch(function (err) {
+              log('Network error: ' + err.message, 'err');
+            })
+            .finally(function () {
+              pendingWrites--;
+            });
+        }
+
+        function onDecode(payload) {
+          var now = Date.now();
+          if (!scanningEnabled) {
+            return;
+          }
+          if (payload === lastPayload && now - lastAt < 1500) {
+            return;
+          }
+          lastPayload = payload;
+          lastAt = now;
+          scanCount++;
+          document.getElementById('scanCount').textContent = String(scanCount);
+          flashOk();
+          postScan(payload);
+        }
+
+        var video = document.getElementById('video');
+        var canvas = document.getElementById('canvas');
+        var ctx = canvas.getContext('2d');
+
+        function scanLoop() {
+          if (video.readyState >= 2 && video.videoWidth) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            var code = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'dontInvert',
+            });
+            if (code && code.data) {
+              onDecode(code.data);
+            }
+          }
+          requestAnimationFrame(scanLoop);
+        }
+
+        async function startCamera() {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            log('Camera ready — scan continuously', 'ok');
+            requestAnimationFrame(scanLoop);
+          } catch (err) {
+            document.getElementById('cameraError').textContent =
+              'Camera failed: ' + err.name + ' — ' + err.message +
+              '\n\nUse HTTPS and grant camera permission.';
+            log(document.getElementById('cameraError').textContent, 'err');
+          }
+        }
+
+        startCamera();
+      })();
+    </script>
+  </body>
+</html>
