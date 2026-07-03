@@ -217,9 +217,11 @@
         if (saved) {
           gasInput.value = saved;
         }
-        gasInput.addEventListener('change', function () {
+        function saveGasUrl() {
           localStorage.setItem(STORAGE_KEY, gasInput.value.trim());
-        });
+        }
+        gasInput.addEventListener('change', saveGasUrl);
+        gasInput.addEventListener('blur', saveGasUrl);
 
         function log(msg, cls) {
           var el = document.createElement('div');
@@ -263,8 +265,8 @@
         }
 
         function postScan(payload) {
-          var url = gasInput.value.trim();
-          if (!url) {
+          var baseUrl = gasInput.value.trim();
+          if (!baseUrl) {
             log('Set GAS web app URL first', 'err');
             return;
           }
@@ -273,17 +275,17 @@
           log('Sending ' + mode + ': ' + payload, 'pending');
 
           var started = performance.now();
-          fetch(url, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({
-              mode: mode,
-              payload: payload,
-              clientTs: new Date().toISOString(),
-              source: 'external',
-            }),
-          })
+          var qs =
+            'action=scan' +
+            '&mode=' +
+            encodeURIComponent(mode) +
+            '&payload=' +
+            encodeURIComponent(payload) +
+            '&source=external';
+          var url = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '?') + qs;
+
+          // GET survives the Apps Script 302 redirect; POST body from external sites often does not.
+          fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
             .then(function () {
               var elapsed = Math.round(performance.now() - started);
               writeTimes.push(elapsed);
@@ -291,7 +293,7 @@
                 writeTimes.shift();
               }
               updateAvg();
-              log('Write dispatched (~' + elapsed + ' ms round-trip)', 'ok');
+              log('Write sent (~' + elapsed + ' ms) — check Scan Log tab', 'ok');
             })
             .catch(function (err) {
               log('Network error: ' + err.message, 'err');
