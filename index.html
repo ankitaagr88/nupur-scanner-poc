@@ -49,6 +49,16 @@
         color: #fff;
         font-size: 0.8rem;
       }
+      .config button {
+        margin-top: 8px;
+        width: 100%;
+        padding: 10px;
+        border: 0;
+        border-radius: 8px;
+        background: #455a64;
+        color: #fff;
+        font-weight: 600;
+      }
       .modes {
         display: flex;
         gap: 8px;
@@ -168,6 +178,7 @@
         type="url"
         placeholder="https://script.google.com/macros/s/....../exec"
       />
+      <button id="btnTest" type="button">Test connection → write test row</button>
     </div>
 
     <div class="modes">
@@ -218,10 +229,97 @@
           gasInput.value = saved;
         }
         function saveGasUrl() {
-          localStorage.setItem(STORAGE_KEY, gasInput.value.trim());
+          localStorage.setItem(STORAGE_KEY, normalizeGasUrl(gasInput.value));
+          gasInput.value = localStorage.getItem(STORAGE_KEY) || '';
         }
         gasInput.addEventListener('change', saveGasUrl);
         gasInput.addEventListener('blur', saveGasUrl);
+
+        function normalizeGasUrl(raw) {
+          var url = String(raw || '').trim();
+          if (!url) {
+            return '';
+          }
+          url = url.replace(/\/dev(\?.*)?$/, '/exec$1');
+          if (url.indexOf('/exec') === -1 && url.indexOf('script.google.com') !== -1) {
+            url = url.replace(/\/?$/, '/exec');
+          }
+          return url;
+        }
+
+        function buildActionUrl(action, extraParams) {
+          var baseUrl = normalizeGasUrl(gasInput.value);
+          if (!baseUrl) {
+            throw new Error('Set GAS web app URL first');
+          }
+          var qs = 'action=' + encodeURIComponent(action);
+          if (extraParams) {
+            for (var key in extraParams) {
+              if (Object.prototype.hasOwnProperty.call(extraParams, key)) {
+                qs += '&' + key + '=' + encodeURIComponent(extraParams[key]);
+              }
+            }
+          }
+          return baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '?') + qs;
+        }
+
+        function callGas(action, extraParams) {
+          return new Promise(function (resolve, reject) {
+            var callbackName = 'nupurCb_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+            var url = buildActionUrl(action, extraParams) + '&callback=' + callbackName;
+            var timeout = setTimeout(function () {
+              cleanup();
+              reject(new Error('Timed out — redeploy web app as New version?'));
+            }, 15000);
+
+            function cleanup() {
+              clearTimeout(timeout);
+              delete window[callbackName];
+              if (script.parentNode) {
+                script.parentNode.removeChild(script);
+              }
+            }
+
+            window[callbackName] = function (result) {
+              cleanup();
+              resolve(result);
+            };
+
+            var script = document.createElement('script');
+            script.src = url;
+            script.onerror = function () {
+              cleanup();
+              reject(new Error('Could not reach Apps Script — check /exec URL and Anyone access'));
+            };
+            document.body.appendChild(script);
+          });
+        }
+
+        document.getElementById('btnTest').onclick = function () {
+          saveGasUrl();
+          log('Testing connection...', 'pending');
+          callGas('ping', {})
+            .then(function (res) {
+              if (!res.ok) {
+                throw new Error(res.error || 'Ping failed');
+              }
+              log('Connected to sheet: ' + res.spreadsheet, 'ok');
+              return callGas('scan', {
+                mode: 'IN',
+                payload: 'TEST|Connection|Check',
+                source: 'connection-test',
+              });
+            })
+            .then(function (res) {
+              if (!res.ok) {
+                throw new Error(res.error || 'Write failed');
+              }
+              log('Test row written — Scan Log row ' + res.row, 'ok');
+            })
+            .catch(function (err) {
+              log(err.message, 'err');
+            });
+        };
 
         function log(msg, cls) {
           var el = document.createElement('div');
@@ -265,38 +363,30 @@
         }
 
         function postScan(payload) {
-          var baseUrl = gasInput.value.trim();
-          if (!baseUrl) {
-            log('Set GAS web app URL first', 'err');
-            return;
-          }
-
+          saveGasUrl();
           pendingWrites++;
           log('Sending ' + mode + ': ' + payload, 'pending');
 
           var started = performance.now();
-          var qs =
-            'action=scan' +
-            '&mode=' +
-            encodeURIComponent(mode) +
-            '&payload=' +
-            encodeURIComponent(payload) +
-            '&source=external';
-          var url = baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '?') + qs;
-
-          // GET survives the Apps Script 302 redirect; POST body from external sites often does not.
-          fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
-            .then(function () {
+          callGas('scan', {
+            mode: mode,
+            payload: payload,
+            source: 'external',
+          })
+            .then(function (res) {
               var elapsed = Math.round(performance.now() - started);
+              if (!res.ok) {
+                throw new Error(res.error || 'Write rejected');
+              }
               writeTimes.push(elapsed);
               if (writeTimes.length > 30) {
                 writeTimes.shift();
               }
               updateAvg();
-              log('Write sent (~' + elapsed + ' ms) — check Scan Log tab', 'ok');
+              log('Sheet row ' + res.row + ' (' + elapsed + ' ms)', 'ok');
             })
             .catch(function (err) {
-              log('Network error: ' + err.message, 'err');
+              log(err.message, 'err');
             })
             .finally(function () {
               pendingWrites--;
